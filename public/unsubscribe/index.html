@@ -1,0 +1,107 @@
+﻿<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, minimal-ui" />
+    <title>unsubscribe</title>
+
+    <title>Unsubscribe</title>
+    <style>
+        body {
+            font-family: "Helvetica Neue",Helvetica,Arial,sans-serif;
+            font-size: 18px;
+            line-height: 1.42857143;
+            color: #333;
+            background-color: #fff;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 600px;
+            margin: 0 auto;
+            padding-top: 100px;
+            text-align: center;
+        }
+
+        .but {
+            background: #00b5e8;
+            padding: 10px 20px;
+            color: #fff;
+            text-transform: uppercase;
+            font-weight: bold;
+            cursor: pointer;
+            border: 0;
+            font-size: 18px;
+        }
+
+        p {
+            margin-bottom: 30px;
+        }
+    </style>
+
+
+</head>
+
+<body>
+
+    <form action="unsubscribe">
+        <input type="hidden" id="guid" name="guid" value="" />
+
+        <div class="container">
+            <div class="_3Un3F6_VzA">
+                <h2 class="_1WSM0YSa4M _2n-FegobIU _3hRIMy4bdh _1aqlFm6OHP">Unsubscribe</h2>
+                <p class="_3n1k435PIu _2Rt0eTOxAR">If you want to proceed with unsubscribing and no longer receive any updates click on "UNSUBSCRIBE".</p>
+            </div>
+            <div class="_3Un3F6_VzA _2zcgr7Ok9X">
+                <button type="submit" class="but"><div class="">Unsubscribe</div></button>
+            </div>
+        </div>
+    </form>
+
+
+
+    <script>
+        function parseURLParams(url) {
+            var queryStart = url.indexOf("?") + 1,
+                queryEnd = url.indexOf("#") + 1 || url.length + 1,
+                query = url.slice(queryStart, queryEnd - 1),
+                pairs = query.replace(/\+/g, " ").split("&"),
+                parms = {}, i, n, v, nv;
+
+            if (query === url || query === "") return;
+
+            for (i = 0; i < pairs.length; i++) {
+                try {
+                    nv = pairs[i].split("=", 2);
+                    n = decodeURIComponent(nv[0]);
+                    v = decodeURIComponent(nv[1]);
+
+                    if (!parms.hasOwnProperty(n)) parms[n] = [];
+                    parms[n].push(nv.length === 2 ? v : null);
+                }
+                catch (error) {
+                    console.error(error);
+
+                }
+            }
+            return parms;
+        }
+
+    </script>
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/2.1.1/jquery.min.js"></script>
+
+    <script>
+
+        
+        try {
+            $("input[name=guid]").val(window.location.search.replace("?", "").split("&")[0].split("=")[1]);
+        }
+        catch
+        {
+        }
+
+    </script>
+
+
+</body>
+</html>

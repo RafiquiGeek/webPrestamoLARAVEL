@@ -1,0 +1,48 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+[x-cloak] {
+    display: none;
+}
+
+/* Estilos para tooltip de motivo de rechazo */
+.motivo-tooltip {
+    position: relative;
+    display: inline-block;
+}
+
+.motivo-tooltip .tooltip-content {
+    visibility: hidden;
+    width: 250px;
+    background-color: #333;
+    color: #fff;
+    text-align: center;
+    border-radius: 6px;
+    padding: 8px;
+    position: absolute;
+    z-index: 9999;
+    bottom: 125%;
+    left: 50%;
+    margin-left: -125px;
+    opacity: 0;
+    transition: opacity 0.3s;
+    font-size: 0.85rem;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+
+.motivo-tooltip .tooltip-content::after {
+    content: "";
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    margin-left: -5px;
+    border-width: 5px;
+    border-style: solid;
+    border-color: #333 transparent transparent transparent;
+}
+
+.motivo-tooltip:hover .tooltip-content {
+    visibility: visible;
+    opacity: 1;
+}
