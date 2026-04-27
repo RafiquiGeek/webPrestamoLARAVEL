@@ -2,8 +2,36 @@
 
 namespace App\Services;
 
+use App\Models\ConfiguracionSunat;
+use Illuminate\Support\Facades\Schema;
+
 class MenuBuilderService
 {
+    /**
+     * URL directa al formulario de edición de la configuración SUNAT activa.
+     * Se construye como path relativo porque el menú se evalúa durante el boot
+     * de la configuración, cuando el URL/Route generator aún no tiene Request.
+     */
+    private static function getConfiguracionSunatUrl(): string
+    {
+        try {
+            if (! Schema::hasTable('configuracion_sunats')) {
+                return 'admin/configuracion-sunat';
+            }
+
+            $config = ConfiguracionSunat::where('activo', true)->first()
+                ?? ConfiguracionSunat::orderBy('id')->first();
+
+            if ($config) {
+                return 'admin/configuracion-sunat/'.$config->id.'/edit';
+            }
+        } catch (\Throwable $e) {
+            // fall through al listado
+        }
+
+        return 'admin/configuracion-sunat';
+    }
+
     /**
      * Construir el menú principal del sistema
      */
@@ -221,9 +249,9 @@ class MenuBuilderService
                         'can' => 'admin.comprobantes.index',
                     ],*/
                     [
-                        'text' => 'Configuración SIRE',
+                        'text' => 'Configuración SUNAT',
                         'icon' => 'fas fa-fw fa-cog',
-                        'route' => 'admin.sire-config.index',
+                        'url' => self::getConfiguracionSunatUrl(),
                         'can' => 'admin.configuracion-sunat.index',
                     ],
                 ],

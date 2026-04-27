@@ -528,16 +528,12 @@ Route::middleware(['auth', 'role:Admin'])->group(function () {
 // Diagnóstico SUNAT (accesible para más roles)
 Route::middleware('auth')->group(function () {
     Route::match(['GET', 'POST'], 'sunat/diagnostico', [\App\Http\Controllers\Admin\ConfiguracionSunatController::class, 'diagnostico'])->name('admin.sunat.diagnostico');
+    Route::post('sunat/diagnostico/reparar', [\App\Http\Controllers\Admin\ConfiguracionSunatController::class, 'repararDiagnostico'])->name('admin.sunat.diagnostico.reparar');
+    Route::post('sunat/diagnostico/probar-auth', [\App\Http\Controllers\Admin\ConfiguracionSunatController::class, 'probarAutenticacionSunat'])->name('admin.sunat.diagnostico.probar-auth');
     Route::get('sunat/buscar-comprobante', [\App\Http\Controllers\Admin\ConfiguracionSunatController::class, 'buscarComprobante'])->name('admin.configuracion-sunat.buscar-comprobante');
     Route::post('sunat/consultar-comprobante', [\App\Http\Controllers\Admin\ConfiguracionSunatController::class, 'consultarComprobanteSunat'])->name('admin.configuracion-sunat.consultar-comprobante');
     Route::get('sunat/api-config', [\App\Http\Controllers\Admin\ConfiguracionSunatController::class, 'apiConfig'])->name('admin.configuracion-sunat.api-config');
     Route::post('sunat/api-config', [\App\Http\Controllers\Admin\ConfiguracionSunatController::class, 'apiConfigSave'])->name('admin.configuracion-sunat.api-config.save');
-
-    // Configuración SIRE/Greenter
-    Route::get('sunat/sire-config', [\App\Http\Controllers\Admin\ConfiguracionSunatController::class, 'sireConfig'])->name('admin.sire-config.index');
-    Route::post('sunat/sire-config', [\App\Http\Controllers\Admin\ConfiguracionSunatController::class, 'sireConfigSave'])->name('admin.sire-config.save');
-    Route::post('sunat/sire-config/test-connection', [\App\Http\Controllers\Admin\ConfiguracionSunatController::class, 'testSireConnection'])->name('admin.sire-config.test-connection');
-
     Route::get('sunat/archivos-info', [\App\Http\Controllers\Admin\ConfiguracionSunatController::class, 'informacionArchivos'])->name('admin.sunat.archivos-info');
 });
 

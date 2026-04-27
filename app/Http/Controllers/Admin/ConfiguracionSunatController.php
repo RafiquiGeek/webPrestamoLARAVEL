@@ -44,7 +44,7 @@ class ConfiguracionSunatController extends Controller
             'usuario_sol' => 'required|string|max:255',
             'clave_sol' => 'required|string|max:255',
             'ambiente' => 'required|in:beta,produccion',
-            'certificado' => 'nullable|file|max:2048',
+            'certificado' => 'nullable|file|max:20480',
             'certificado_clave' => 'nullable|string|max:255',
             'razon_social' => 'required|string|max:255',
             'nombre_comercial' => 'nullable|string|max:255',
@@ -73,19 +73,28 @@ class ConfiguracionSunatController extends Controller
 
         $data = $request->all();
 
+        // Sincronizar sol_user y sol_pass (usados por SireApiService) desde los campos del formulario
+        $usuarioSol = $data['usuario_sol'] ?? '';
+        $rucVal = $data['ruc'] ?? '';
+        $data['sol_user'] = (strlen($rucVal) === 11 && str_starts_with($usuarioSol, $rucVal))
+            ? substr($usuarioSol, 11)
+            : $usuarioSol;
+        if (!empty($data['clave_sol'])) {
+            $data['sol_pass'] = encrypt($data['clave_sol']);
+        }
+
         $configuracion = ConfiguracionSunat::create($data);
 
         // Procesar certificado si se subió
         if ($request->hasFile('certificado')) {
             $certificado = $request->file('certificado');
-            $fileContent = file_get_contents($certificado->getRealPath());
             $password = $request->input('certificado_clave', '');
 
-            // Guardar certificado como archivo físico
-            $configuracion->saveCertificateAsFile($fileContent, $password);
+            $resultCert = $this->procesarYGuardarCertificado($configuracion, $certificado, $password);
 
-            // Actualizar el nombre del certificado
-            $configuracion->update(['certificado_nombre' => $certificado->getClientOriginalName()]);
+            if (! $resultCert['success']) {
+                return back()->withErrors(['certificado' => $resultCert['error']])->withInput();
+            }
         }
 
         // Si es la primera configuración, activarla automáticamente
@@ -114,7 +123,7 @@ class ConfiguracionSunatController extends Controller
             'usuario_sol' => 'required|string|max:255',
             'clave_sol' => 'required|string|max:255',
             'ambiente' => 'required|in:beta,produccion',
-            'certificado' => 'nullable|file|max:2048',
+            'certificado' => 'nullable|file|max:20480',
             'certificado_clave' => 'nullable|string|max:255',
             'razon_social' => 'required|string|max:255',
             'nombre_comercial' => 'nullable|string|max:255',
@@ -143,23 +152,126 @@ class ConfiguracionSunatController extends Controller
 
         $data = $request->all();
 
+        // Sincronizar sol_user y sol_pass (usados por SireApiService) desde los campos del formulario
+        $usuarioSol = $data['usuario_sol'] ?? '';
+        $rucVal = $data['ruc'] ?? '';
+        $data['sol_user'] = (strlen($rucVal) === 11 && str_starts_with($usuarioSol, $rucVal))
+            ? substr($usuarioSol, 11)
+            : $usuarioSol;
+        if (!empty($data['clave_sol'])) {
+            $data['sol_pass'] = encrypt($data['clave_sol']);
+        }
+
         $configuracionSunat->update($data);
 
         // Procesar certificado si se subió uno nuevo
         if ($request->hasFile('certificado')) {
             $certificado = $request->file('certificado');
-            $fileContent = file_get_contents($certificado->getRealPath());
             $password = $request->input('certificado_clave', '');
 
-            // Guardar certificado como archivo físico
-            $configuracionSunat->saveCertificateAsFile($fileContent, $password);
+            $resultCert = $this->procesarYGuardarCertificado($configuracionSunat, $certificado, $password);
 
-            // Actualizar el nombre del certificado
-            $configuracionSunat->update(['certificado_nombre' => $certificado->getClientOriginalName()]);
+            if (! $resultCert['success']) {
+                return back()->withErrors(['certificado' => $resultCert['error']])->withInput();
+            }
         }
 
         return redirect()->route('admin.configuracion-sunat.index')
             ->with('success', 'Configuración SUNAT actualizada exitosamente');
+    }
+
+    /**
+     * Procesar certificado subido: validarlo, extraerlo a PEM y guardar en todos
+     * los campos requeridos tanto por el flujo legacy como por SireApiService.
+     *
+     * Esto asegura que:
+     *  - `sire_cert_path`, `sire_key_path` apunten a los PEM (usados por SireApiService).
+     *  - `sire_cert_password` quede encriptada (SireApiService hace decrypt()).
+     *  - El certificado queda listo para firmar XMLs y mutual TLS con SUNAT.
+     */
+    private function procesarYGuardarCertificado(ConfiguracionSunat $configuracion, $certificadoFile, string $password): array
+    {
+        try {
+            // 1) Guardar el archivo original en storage/app/<tempPath>
+            $tempPath = $certificadoFile->store('sire_certs_temp');
+
+            // 2) Validar el certificado y la contraseña
+            $validation = CertificateService::validateAndExtractMetadata($tempPath, $password);
+
+            if (! $validation['success']) {
+                Storage::delete($tempPath);
+
+                return [
+                    'success' => false,
+                    'error' => 'Certificado inválido o contraseña incorrecta: '.$validation['error'],
+                ];
+            }
+
+            // 3) Extraer a archivos PEM separados (cert + key) para usar con Greenter / mutual TLS.
+            //    Forzamos el nombre con el RUC de la configuración para evitar archivos con
+            //    espacios (e.g. cert_SOFTWARE DE FACTURACION ELECTRONICA_xxx.pem).
+            $pemExtraction = CertificateService::extractToPem($tempPath, $password, $configuracion->ruc);
+
+            // 4) Copiar el PFX original a storage/app/keys/ para conservar compatibilidad
+            $extension = strtolower($certificadoFile->getClientOriginalExtension());
+            $filenamePfx = 'certificado_'.$configuracion->ruc.'_'.time().'.'.$extension;
+            $pfxDestRelative = 'keys/'.$filenamePfx;
+
+            $pfxContent = Storage::get($tempPath);
+            Storage::put($pfxDestRelative, $pfxContent);
+
+            // 5) Eliminar archivo temporal
+            Storage::delete($tempPath);
+
+            if (! $pemExtraction['success']) {
+                return [
+                    'success' => false,
+                    'error' => 'No se pudo extraer el certificado a PEM: '.$pemExtraction['error'],
+                ];
+            }
+
+            // 6) Actualizar la configuración en BD con TODAS las rutas y contraseñas
+            //    Importante: sire_cert_password debe quedar ENCRIPTADA porque SireApiService
+            //    hace decrypt() en tiempo de envío.
+            $configuracion->update([
+                'certificado_nombre' => $certificadoFile->getClientOriginalName(),
+                'certificado_file_path' => $filenamePfx,
+                'certificado_clave' => $password, // legacy (texto plano) — mantenido por retrocompatibilidad
+                'certificado_contenido' => null,
+                // PEM separados para flujo antiguo
+                'certificado_pem_path' => basename($pemExtraction['cert_path']),
+                'clave_privada_pem_path' => basename($pemExtraction['key_path']),
+                // Campos usados por SireApiService (flujo actual de envío a SUNAT)
+                'sire_cert_path' => $pemExtraction['cert_path'],   // ej. keys/cert_20611373181_xxx.pem
+                'sire_key_path' => $pemExtraction['key_path'],     // ej. keys/key_20611373181_xxx.pem
+                'sire_cert_password' => encrypt($password),
+            ]);
+
+            \Log::info('Certificado procesado y guardado correctamente', [
+                'ruc' => $configuracion->ruc,
+                'cert_path' => $pemExtraction['cert_path'],
+                'key_path' => $pemExtraction['key_path'],
+                'pfx_path' => $pfxDestRelative,
+                'ruc_certificado' => $validation['ruc'] ?? null,
+                'vigente_hasta' => $validation['valid_to'] ?? null,
+                'dias_restantes' => $validation['dias_restantes'] ?? null,
+            ]);
+
+            return [
+                'success' => true,
+                'metadata' => $validation,
+            ];
+        } catch (\Exception $e) {
+            \Log::error('Error al procesar certificado en edit', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+
+            return [
+                'success' => false,
+                'error' => 'Error al procesar el certificado: '.$e->getMessage(),
+            ];
+        }
     }
 
     public function destroy(ConfiguracionSunat $configuracionSunat)
@@ -355,7 +467,7 @@ class ConfiguracionSunatController extends Controller
                     $recomendaciones[] = 'Subir certificado digital válido';
                 }
 
-                // Clave del certificado
+                // Clave del certificado (legacy)
                 if ($config->certificado_clave) {
                     $certificadosPermisos[] = [
                         'nombre' => 'Clave de Certificado',
@@ -371,6 +483,139 @@ class ConfiguracionSunatController extends Controller
                     ];
                     $criticos++;
                     $recomendaciones[] = 'Configurar clave del certificado digital';
+                }
+
+                // Verificación real: PEM cert + PEM key existen y están limpios
+                $certPemRel = $config->sire_cert_path;
+                $keyPemRel = $config->sire_key_path;
+                $certPemAbs = $certPemRel ? storage_path('app/'.$certPemRel) : null;
+                $keyPemAbs = $keyPemRel ? storage_path('app/'.$keyPemRel) : null;
+
+                $pemCertOk = $certPemAbs && file_exists($certPemAbs);
+                $pemKeyOk = $keyPemAbs && file_exists($keyPemAbs);
+                $sinEspacios = $certPemRel && $keyPemRel
+                    && strpos($certPemRel, ' ') === false
+                    && strpos($keyPemRel, ' ') === false;
+
+                if ($pemCertOk && $pemKeyOk && $sinEspacios) {
+                    $certificadosPermisos[] = [
+                        'nombre' => 'Archivos PEM (cert + key)',
+                        'estado' => true,
+                        'descripcion' => 'Extraídos correctamente: '.basename($certPemRel).' / '.basename($keyPemRel),
+                    ];
+                    $exitosas++;
+                } elseif ($pemCertOk && $pemKeyOk && ! $sinEspacios) {
+                    $certificadosPermisos[] = [
+                        'nombre' => 'Archivos PEM (cert + key)',
+                        'estado' => false,
+                        'descripcion' => 'Nombres con espacios — pueden romper mTLS: '.basename($certPemRel),
+                        'accion' => ['tipo' => 'regenerar_pems', 'label' => 'Regenerar PEMs'],
+                    ];
+                    $advertencias++;
+                    $recomendaciones[] = 'Regenerar PEMs desde el PFX con el botón "Regenerar PEMs"';
+                } else {
+                    $certificadosPermisos[] = [
+                        'nombre' => 'Archivos PEM (cert + key)',
+                        'estado' => false,
+                        'descripcion' => 'No encontrados en storage/app/keys',
+                        'accion' => ['tipo' => 'regenerar_pems', 'label' => 'Regenerar PEMs'],
+                    ];
+                    $criticos++;
+                    $recomendaciones[] = 'Regenerar PEMs desde el PFX con el botón "Regenerar PEMs"';
+                }
+
+                // Verificación real: ¿el certificado puede firmar?
+                try {
+                    $pwdCert = $config->sire_cert_password ? \Crypt::decryptString($config->sire_cert_password) : '';
+                    if ($pemCertOk && $pemKeyOk) {
+                        $certContent = file_get_contents($certPemAbs);
+                        $keyContent = file_get_contents($keyPemAbs);
+                        $pkey = @openssl_pkey_get_private($keyContent, $pwdCert);
+                        if ($pkey === false) {
+                            $pkey = @openssl_pkey_get_private($keyContent);
+                        }
+                        $firma = null;
+                        $ok = $pkey && @openssl_sign('diagnostico-sunat', $firma, $pkey, OPENSSL_ALGO_SHA256);
+                        if ($ok && strlen($firma) > 0) {
+                            $certificadosPermisos[] = [
+                                'nombre' => 'Prueba de firma digital',
+                                'estado' => true,
+                                'descripcion' => 'openssl_sign OK ('.strlen($firma).' bytes) — el certificado puede firmar XML',
+                            ];
+                            $exitosas++;
+                        } else {
+                            $certificadosPermisos[] = [
+                                'nombre' => 'Prueba de firma digital',
+                                'estado' => false,
+                                'descripcion' => 'No se pudo firmar con la clave privada — revisa clave del certificado',
+                                'accion' => ['tipo' => 'ir_editar', 'label' => 'Re-subir certificado'],
+                            ];
+                            $criticos++;
+                            $recomendaciones[] = 'Re-subir el certificado con la contraseña correcta';
+                        }
+                    }
+                } catch (\Throwable $e) {
+                    $certificadosPermisos[] = [
+                        'nombre' => 'Prueba de firma digital',
+                        'estado' => false,
+                        'descripcion' => 'Error: '.$e->getMessage(),
+                    ];
+                    $criticos++;
+                }
+
+                // Verificación: ¿sire_cert_password se puede desencriptar?
+                try {
+                    if ($config->sire_cert_password) {
+                        \Crypt::decryptString($config->sire_cert_password);
+                        $certificadosPermisos[] = [
+                            'nombre' => 'Desencriptado de clave del certificado',
+                            'estado' => true,
+                            'descripcion' => 'La clave del certificado se desencripta correctamente con APP_KEY actual',
+                        ];
+                        $exitosas++;
+                    }
+                } catch (\Throwable $e) {
+                    $certificadosPermisos[] = [
+                        'nombre' => 'Desencriptado de clave del certificado',
+                        'estado' => false,
+                        'descripcion' => 'MAC inválido — sire_cert_password fue encriptada con otra APP_KEY',
+                        'accion' => ['tipo' => 'reencriptar_cert_pass', 'label' => 'Re-encriptar con APP_KEY actual', 'requiere_input' => true, 'input_label' => 'Contraseña del certificado (.pfx)'],
+                    ];
+                    $criticos++;
+                    $recomendaciones[] = 'Re-encriptar la clave del certificado con la APP_KEY actual';
+                }
+
+                // Verificación: sol_pass (usuario SOL secundario - el que usa SireApiService)
+                // sol_pass se guarda encriptado (> 50 chars). clave_sol es el usuario SOL principal (texto plano).
+                $solPass = $config->sol_pass ?? null;
+                if ($solPass && strlen($solPass) > 50) {
+                    try {
+                        \Crypt::decryptString($solPass);
+                        $certificadosPermisos[] = [
+                            'nombre' => 'Desencriptado de Clave SOL secundaria (sol_pass)',
+                            'estado' => true,
+                            'descripcion' => 'sol_pass se desencripta correctamente con APP_KEY actual',
+                        ];
+                        $exitosas++;
+                    } catch (\Throwable $e) {
+                        $certificadosPermisos[] = [
+                            'nombre' => 'Desencriptado de Clave SOL secundaria (sol_pass)',
+                            'estado' => false,
+                            'descripcion' => 'MAC inválido — sol_pass fue encriptado con otra APP_KEY. SireApiService fallará la autenticación SOL.',
+                            'accion' => ['tipo' => 'reencriptar_sol_pass', 'label' => 'Re-encriptar clave SOL', 'requiere_input' => true, 'input_label' => 'Clave del usuario SOL secundario ('.($config->sol_user ?: 'sol_user').')'],
+                        ];
+                        $criticos++;
+                        $recomendaciones[] = 'Re-encriptar la clave del usuario SOL secundario ('.($config->sol_user ?: 'sol_user').') con la APP_KEY actual';
+                    }
+                } elseif (! $solPass) {
+                    $certificadosPermisos[] = [
+                        'nombre' => 'Clave SOL secundaria (sol_pass)',
+                        'estado' => false,
+                        'descripcion' => 'No configurada — SireApiService no podrá autenticar con SUNAT',
+                        'accion' => ['tipo' => 'reencriptar_sol_pass', 'label' => 'Configurar clave SOL', 'requiere_input' => true, 'input_label' => 'Clave del usuario SOL secundario'],
+                    ];
+                    $criticos++;
+                    $recomendaciones[] = 'Configurar sol_user + sol_pass (usuario SOL secundario de SUNAT)';
                 }
             }
 
@@ -560,6 +805,15 @@ class ConfiguracionSunatController extends Controller
                 }
             }
 
+            // Aviso sobre "Rejected by policy" (perfil de emisión en SUNAT SOL)
+            if ($config && $config->sol_user && $solPass) {
+                $conectividad[] = [
+                    'nombre' => 'Perfil de emisión SUNAT (externo)',
+                    'estado' => true,
+                    'descripcion' => 'Si al emitir aparece "Rejected by policy / No tiene el perfil para enviar comprobantes electrónicos", el usuario SOL ('.$config->sol_user.') NO tiene el perfil "Emitir Comprobantes Electrónicos" asignado en SUNAT. Esto se corrige en el portal SOL, no en código.',
+                ];
+            }
+
             // Resumen
             $totalVerificaciones = $exitosas + $advertencias + $criticos;
 
@@ -602,6 +856,315 @@ class ConfiguracionSunatController extends Controller
                 'message' => 'Error al realizar el diagnóstico: '.$e->getMessage(),
             ], 500);
         }
+    }
+
+    /**
+     * Ejecutar una acción de reparación disparada desde el diagnóstico.
+     * Acciones soportadas: regenerar_pems, reencriptar_cert_pass, reencriptar_sol_pass.
+     */
+    public function repararDiagnostico(Request $request)
+    {
+        $request->validate([
+            'accion' => 'required|string|in:regenerar_pems,reencriptar_cert_pass,reencriptar_sol_pass',
+            'valor' => 'nullable|string|max:255',
+        ]);
+
+        $config = ConfiguracionSunat::where('activo', true)->first();
+        if (! $config) {
+            return response()->json(['success' => false, 'message' => 'No hay configuración SUNAT activa'], 404);
+        }
+
+        try {
+            switch ($request->accion) {
+                case 'regenerar_pems':
+                    return $this->fixRegenerarPems($config);
+
+                case 'reencriptar_cert_pass':
+                    $clave = (string) $request->input('valor', '');
+                    if ($clave === '') {
+                        return response()->json(['success' => false, 'message' => 'Ingresa la contraseña del certificado'], 422);
+                    }
+                    return $this->fixReencriptarCertPass($config, $clave);
+
+                case 'reencriptar_sol_pass':
+                    $clave = (string) $request->input('valor', '');
+                    if ($clave === '') {
+                        return response()->json(['success' => false, 'message' => 'Ingresa la clave del usuario SOL secundario'], 422);
+                    }
+                    return $this->fixReencriptarSolPass($config, $clave);
+            }
+        } catch (\Throwable $e) {
+            \Log::error('Fallo repararDiagnostico', [
+                'accion' => $request->accion,
+                'error' => $e->getMessage(),
+            ]);
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+
+        return response()->json(['success' => false, 'message' => 'Acción no soportada'], 400);
+    }
+
+    private function fixRegenerarPems(ConfiguracionSunat $config)
+    {
+        if (empty($config->certificado_file_path)) {
+            return response()->json(['success' => false, 'message' => 'No hay PFX cargado para regenerar PEMs'], 422);
+        }
+
+        $pfxRel = 'keys/'.$config->certificado_file_path;
+        if (! Storage::exists($pfxRel)) {
+            return response()->json(['success' => false, 'message' => 'PFX no encontrado: '.$pfxRel], 422);
+        }
+
+        if (empty($config->sire_cert_password)) {
+            return response()->json(['success' => false, 'message' => 'No hay sire_cert_password para desencriptar; usa "Re-encriptar clave del certificado" primero'], 422);
+        }
+
+        try {
+            $password = \Crypt::decryptString($config->sire_cert_password);
+        } catch (\Throwable $e) {
+            return response()->json(['success' => false, 'message' => 'No se pudo desencriptar la clave del certificado. Usa "Re-encriptar clave del certificado" primero.'], 422);
+        }
+
+        $result = CertificateService::extractToPem($pfxRel, $password, $config->ruc);
+        if (! $result['success']) {
+            return response()->json(['success' => false, 'message' => $result['error'] ?? 'Error extrayendo PEMs'], 500);
+        }
+
+        $config->update([
+            'sire_cert_path' => $result['cert_path'],
+            'sire_key_path' => $result['key_path'],
+            'certificado_pem_path' => basename($result['cert_path']),
+            'clave_privada_pem_path' => basename($result['key_path']),
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'PEMs regenerados correctamente',
+            'cert_path' => $result['cert_path'],
+            'key_path' => $result['key_path'],
+        ]);
+    }
+
+    private function fixReencriptarCertPass(ConfiguracionSunat $config, string $password)
+    {
+        // Validar que la contraseña realmente abra el PFX antes de persistirla
+        if (empty($config->certificado_file_path)) {
+            return response()->json(['success' => false, 'message' => 'No hay PFX cargado'], 422);
+        }
+
+        $pfxRel = 'keys/'.$config->certificado_file_path;
+        if (! Storage::exists($pfxRel)) {
+            return response()->json(['success' => false, 'message' => 'PFX no encontrado'], 422);
+        }
+
+        $validation = CertificateService::validateAndExtractMetadata($pfxRel, $password);
+        if (! $validation['success']) {
+            return response()->json(['success' => false, 'message' => 'Contraseña inválida para el PFX: '.($validation['error'] ?? '')], 422);
+        }
+
+        $config->update([
+            'certificado_clave' => $password,
+            'sire_cert_password' => encrypt($password),
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Clave del certificado re-encriptada con APP_KEY actual',
+        ]);
+    }
+
+    private function fixReencriptarSolPass(ConfiguracionSunat $config, string $password)
+    {
+        $config->update([
+            'sol_pass' => encrypt($password),
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Clave SOL re-encriptada con APP_KEY actual',
+        ]);
+    }
+
+    /**
+     * Probar autenticación SOL contra SUNAT haciendo una llamada SOAP real.
+     * Distingue entre: credenciales OK + perfil OK (esperado), perfil faltante (0111),
+     * credenciales incorrectas (0102/0104), y otros fallos.
+     */
+    public function probarAutenticacionSunat(Request $request)
+    {
+        $config = ConfiguracionSunat::where('activo', true)->first();
+        if (! $config) {
+            return response()->json(['success' => false, 'message' => 'No hay configuración SUNAT activa'], 404);
+        }
+
+        if (empty($config->sol_user) || empty($config->sol_pass)) {
+            return response()->json([
+                'success' => false,
+                'codigo' => null,
+                'estado' => 'config_incompleta',
+                'mensaje' => 'Falta sol_user o sol_pass en la configuración',
+            ]);
+        }
+
+        // Desencriptar sol_pass
+        $solPass = $config->sol_pass;
+        if (strlen($solPass) > 50) {
+            try {
+                $solPass = decrypt($solPass);
+            } catch (\Throwable $e) {
+                return response()->json([
+                    'success' => false,
+                    'codigo' => null,
+                    'estado' => 'cred_no_desencripta',
+                    'mensaje' => 'No se pudo desencriptar sol_pass con la APP_KEY actual: '.$e->getMessage(),
+                ]);
+            }
+        }
+
+        // Localizar PEM
+        $certAbs = $config->sire_cert_path ? storage_path('app/'.$config->sire_cert_path) : null;
+        $keyAbs = $config->sire_key_path ? storage_path('app/'.$config->sire_key_path) : null;
+        if (! $certAbs || ! file_exists($certAbs) || ! $keyAbs || ! file_exists($keyAbs)) {
+            return response()->json([
+                'success' => false,
+                'codigo' => null,
+                'estado' => 'cert_faltante',
+                'mensaje' => 'No se encontraron los archivos PEM del certificado',
+            ]);
+        }
+
+        try {
+            $endpoint = $config->ambiente === 'produccion'
+                ? \Greenter\Ws\Services\SunatEndpoints::FE_PRODUCCION
+                : \Greenter\Ws\Services\SunatEndpoints::FE_BETA;
+
+            // Cliente SOAP de Greenter — expone setCredentials/setService/call.
+            // Usar WSDL local evita timeouts y ambigüedades al descargarlo.
+            $wsdlLocal = \Greenter\Ws\Services\WsdlProvider::getBillPath();
+            $client = new \Greenter\Ws\Services\SoapClient($wsdlLocal);
+            $client->setService($endpoint);
+
+            // WS-Security: usuario = RUC + sol_user
+            $wssUser = $config->ruc.$config->sol_user;
+            $client->setCredentials($wssUser, $solPass);
+
+            // Llamar sendBill con un ZIP de prueba. SUNAT responderá con SoapFault.
+            // El fault code nos dice exactamente qué pasa:
+            //   - 0102/0104 → credenciales SOL incorrectas
+            //   - 0111      → sin perfil para emitir
+            //   - 01xx/03xx → auth+perfil OK pero contenido/schema inválido (lo esperado)
+            //
+            // Importante: la firma correcta de Greenter es
+            //   $client->call('sendBill', ['parameters' => ['fileName' => ..., 'contentFile' => ...]])
+            // y contentFile va como binario crudo (PHP SoapClient lo codifica a base64).
+            try {
+                // RUC-TIPO-SERIE-NUMERO.zip → nombre con formato válido para evitar 0150/0151 antes de auth
+                $zipName = $config->ruc.'-01-F001-1.zip';
+                $params = [
+                    'fileName' => $zipName,
+                    'contentFile' => "PK\x03\x04", // Cabecera ZIP mínima — pasa el filtro de nombre, falla en validación de contenido
+                ];
+
+                $client->call('sendBill', ['parameters' => $params]);
+
+                // En el raro caso de éxito (no debería pasar con ZIP inválido)
+                return $this->interpretarRespuestaSunat(null, 'Llamada aceptada sin fault (inesperado)', $config);
+
+            } catch (\SoapFault $fault) {
+                $faultMsg = $fault->faultstring ?? $fault->getMessage();
+                $faultCode = $fault->faultcode ?? '';
+
+                \Log::info('probarAutenticacionSunat fault', [
+                    'faultcode' => $faultCode,
+                    'faultstring' => $faultMsg,
+                    'detail' => isset($fault->detail) ? json_encode($fault->detail) : null,
+                ]);
+
+                // SUNAT devuelve el código en faultcode (e.g. "soap-env:Client.0111") o en faultstring
+                $codigoExtraido = null;
+                if (preg_match('/(\d{4})/', (string) $faultCode, $m)) {
+                    $codigoExtraido = $m[1];
+                } elseif (preg_match('/\b(\d{4})\b/', $faultMsg, $m)) {
+                    $codigoExtraido = $m[1];
+                }
+
+                return $this->interpretarRespuestaSunat($codigoExtraido, $faultMsg, $config);
+            }
+
+        } catch (\Throwable $e) {
+            \Log::error('probarAutenticacionSunat exception', ['error' => $e->getMessage(), 'trace' => $e->getTraceAsString()]);
+            return response()->json([
+                'success' => false,
+                'codigo' => null,
+                'estado' => 'excepcion',
+                'mensaje' => 'Excepción: '.$e->getMessage(),
+            ]);
+        }
+    }
+
+    private function interpretarRespuestaSunat(?string $code, string $msg, ConfiguracionSunat $config)
+    {
+        $lowerMsg = strtolower($msg);
+
+        // Caso esperado cuando auth+perfil están OK: SUNAT rechaza el ZIP de prueba
+        // Códigos de content/schema/zip que demuestran que ya pasó la auth y tiene perfil:
+        //   0100-0162 (excepto 0102/0104/0111), 0150-0153 (zip), 0300-0306 (firma/schema)
+        $codigosContenidoInvalido = ['0100', '0101', '0103', '0105', '0109', '0112', '0113',
+            '0125', '0126', '0127', '0128', '0130', '0131', '0137', '0140',
+            '0150', '0151', '0152', '0153', '0154', '0155', '0156', '0157', '0158', '0159',
+            '0160', '0161', '0162', '0300', '0301', '0302', '0303', '0304', '0305', '0306'];
+
+        if (
+            in_array($code, $codigosContenidoInvalido, true)
+            || stripos($lowerMsg, 'archivo') !== false
+            || stripos($lowerMsg, 'zip') !== false
+            || stripos($lowerMsg, 'descomprimir') !== false
+            || stripos($lowerMsg, 'contenido del archivo') !== false
+            || stripos($lowerMsg, 'ticket') !== false
+            || stripos($lowerMsg, 'no existe el xml') !== false
+            || stripos($lowerMsg, 'firma') !== false
+            || stripos($lowerMsg, 'schema') !== false
+            || stripos($lowerMsg, 'esquema') !== false
+        ) {
+            return response()->json([
+                'success' => true,
+                'codigo' => $code,
+                'estado' => 'auth_ok',
+                'mensaje' => '✓ Autenticación SOL exitosa y el usuario "'.$config->sol_user.'" tiene perfil para emitir. SUNAT solo rechazó el contenido de prueba vacío (esperado).',
+                'detalle_sunat' => $msg,
+            ]);
+        }
+
+        // Falta de perfil — la causa del problema actual
+        if ($code === '0111' || stripos($msg, 'perfil') !== false || stripos($msg, 'rejected by policy') !== false) {
+            return response()->json([
+                'success' => false,
+                'codigo' => '0111',
+                'estado' => 'sin_perfil',
+                'mensaje' => 'CONFIRMADO: el usuario SOL "'.$config->sol_user.'" NO tiene el perfil "Emitir Comprobantes Electrónicos" en SUNAT. Asignarlo en el portal SOL → Mi RUC → Usuarios secundarios → Modificar perfil.',
+                'detalle_sunat' => $msg,
+            ]);
+        }
+
+        // Credenciales SOL incorrectas
+        if (in_array($code, ['0102', '0104'], true) || stripos($lowerMsg, 'usuario') !== false || stripos($lowerMsg, 'clave') !== false) {
+            return response()->json([
+                'success' => false,
+                'codigo' => $code,
+                'estado' => 'auth_invalida',
+                'mensaje' => 'Credenciales SOL incorrectas (sol_user o sol_pass). RUC: '.$config->ruc.', sol_user: '.$config->sol_user,
+                'detalle_sunat' => $msg,
+            ]);
+        }
+
+        // Cualquier otro caso → reportar tal cual
+        return response()->json([
+            'success' => false,
+            'codigo' => $code,
+            'estado' => 'desconocido',
+            'mensaje' => 'Respuesta inesperada de SUNAT. Código: '.($code ?: 'n/a').'. Mensaje: '.$msg,
+            'detalle_sunat' => $msg,
+        ]);
     }
 
     /**
@@ -836,340 +1399,6 @@ class ConfiguracionSunatController extends Controller
             return redirect()->back()
                 ->withInput()
                 ->with('error', 'Error al guardar la configuración: ' . $e->getMessage());
-        }
-    }
-
-    /**
-     * Mostrar formulario de configuración SIRE/Greenter
-     */
-    public function sireConfig()
-    {
-        $config = ConfiguracionSunat::obtenerActiva();
-
-        if (!$config) {
-            return redirect()->route('admin.configuracion-sunat.index')
-                ->with('error', 'No hay configuración SUNAT activa. Cree una configuración primero.');
-        }
-
-        // Obtener información del certificado si existe
-        $certificadoInfo = null;
-        if ($config->sire_cert_path) {
-            $certPath = storage_path('app/' . $config->sire_cert_path);
-            if (file_exists($certPath)) {
-                try {
-                    // Intentar obtener información del certificado
-                    $certPassword = !empty($config->sire_cert_password) ? decrypt($config->sire_cert_password) : '';
-                    $certificadoInfo = $this->obtenerInfoCertificado($certPath, $certPassword);
-                } catch (\Exception $e) {
-                    \Log::warning('No se pudo leer información del certificado', ['error' => $e->getMessage()]);
-                }
-            }
-        }
-
-        return view('admin.ConfiguracionSunat.sire-config', compact('config', 'certificadoInfo'));
-    }
-
-    /**
-     * Guardar configuración SIRE/Greenter
-     */
-    public function sireConfigSave(Request $request)
-    {
-        try {
-            $configuracion = ConfiguracionSunat::obtenerActiva();
-
-            if (!$configuracion) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'No hay configuración SUNAT activa'
-                ], 400);
-            }
-
-            // Validar datos
-            $request->validate([
-                'usar_sire' => 'nullable|boolean',
-                'cert_p12' => 'nullable|file|max:20480',
-                'cert_password' => 'required_with:cert_p12|nullable|string|max:255',
-                'sol_user' => 'nullable|string|max:50',
-                'sol_pass' => 'nullable|string|max:255',
-                'modo_produccion' => 'nullable|boolean',
-                // Credenciales OAuth2
-                'sire_client_id' => 'nullable|string|max:255',
-                'sire_client_secret' => 'nullable|string|max:255',
-                // Series Testing
-                'sire_serie_boleta_test' => 'nullable|string|max:4',
-                'sire_numero_boleta_test' => 'nullable|integer|min:1',
-                'sire_serie_factura_test' => 'nullable|string|max:4',
-                'sire_numero_factura_test' => 'nullable|integer|min:1',
-                // Series Producción
-                'sire_serie_boleta_prod' => 'nullable|string|max:4',
-                'sire_numero_boleta_prod' => 'nullable|integer|min:1',
-                'sire_serie_factura_prod' => 'nullable|string|max:4',
-                'sire_numero_factura_prod' => 'nullable|integer|min:1',
-            ]);
-
-            // Actualizar campos básicos
-            $dataToUpdate = [
-                'usar_sire' => $request->has('usar_sire') ? true : false,
-                'modo_produccion' => $request->input('modo_produccion', 0) ? true : false,
-            ];
-
-            // Solo actualizar credenciales SOL si se proporcionaron
-            if ($request->filled('sol_user')) {
-                $dataToUpdate['sol_user'] = $request->sol_user;
-            }
-
-            if ($request->filled('sol_pass')) {
-                $dataToUpdate['sol_pass'] = encrypt($request->sol_pass);
-            }
-
-            // Actualizar credenciales OAuth2 (obligatorias para evitar error 0111)
-            if ($request->filled('sire_client_id')) {
-                $dataToUpdate['sire_client_id'] = $request->sire_client_id;
-            }
-
-            if ($request->filled('sire_client_secret')) {
-                $dataToUpdate['sire_client_secret'] = encrypt($request->sire_client_secret);
-                // Invalidar token actual para forzar regeneración con nuevas credenciales
-                $dataToUpdate['sire_access_token'] = null;
-                $dataToUpdate['sire_token_expires_at'] = null;
-            }
-
-            // Actualizar series Testing
-            if ($request->filled('sire_serie_boleta_test')) {
-                $dataToUpdate['sire_serie_boleta_test'] = strtoupper($request->sire_serie_boleta_test);
-            }
-            if ($request->filled('sire_numero_boleta_test')) {
-                $dataToUpdate['sire_numero_boleta_test'] = $request->sire_numero_boleta_test;
-            }
-            if ($request->filled('sire_serie_factura_test')) {
-                $dataToUpdate['sire_serie_factura_test'] = strtoupper($request->sire_serie_factura_test);
-            }
-            if ($request->filled('sire_numero_factura_test')) {
-                $dataToUpdate['sire_numero_factura_test'] = $request->sire_numero_factura_test;
-            }
-
-            // Actualizar series Producción
-            if ($request->filled('sire_serie_boleta_prod')) {
-                $dataToUpdate['sire_serie_boleta_prod'] = strtoupper($request->sire_serie_boleta_prod);
-            }
-            if ($request->filled('sire_numero_boleta_prod')) {
-                $dataToUpdate['sire_numero_boleta_prod'] = $request->sire_numero_boleta_prod;
-            }
-            if ($request->filled('sire_serie_factura_prod')) {
-                $dataToUpdate['sire_serie_factura_prod'] = strtoupper($request->sire_serie_factura_prod);
-            }
-            if ($request->filled('sire_numero_factura_prod')) {
-                $dataToUpdate['sire_numero_factura_prod'] = $request->sire_numero_factura_prod;
-            }
-
-            // Procesar certificado digital si se subió uno nuevo
-            if ($request->hasFile('cert_p12')) {
-                $certificado = $request->file('cert_p12');
-                $password = $request->input('cert_password', '');
-
-                \Log::info('Procesando certificado SIRE', [
-                    'filename' => $certificado->getClientOriginalName(),
-                    'size' => $certificado->getSize(),
-                    'has_password' => !empty($password)
-                ]);
-
-                // Guardar archivo temporal
-                $tempPath = $certificado->store('sire_certs_temp');
-
-                // Validar el certificado usando CertificateService
-                $validation = CertificateService::validateAndExtractMetadata($tempPath, $password);
-
-                if (!$validation['success']) {
-                    // Eliminar archivo temporal
-                    Storage::delete($tempPath);
-
-                    return response()->json([
-                        'success' => false,
-                        'message' => 'Error al validar certificado: ' . $validation['error']
-                    ], 400);
-                }
-
-                // Extraer certificado a formato PEM para compatibilidad con OpenSSL 3.x
-                $pemExtraction = CertificateService::extractToPem($tempPath, $password);
-
-                // Eliminar archivo temporal
-                Storage::delete($tempPath);
-
-                if ($pemExtraction['success']) {
-                    // Guardar rutas de los archivos PEM extraídos
-                    $dataToUpdate['sire_cert_path'] = $pemExtraction['cert_path'];
-                    $dataToUpdate['sire_key_path'] = $pemExtraction['key_path'];
-                    $dataToUpdate['sire_cert_password'] = encrypt($password);
-
-                    \Log::info('Certificado extraído a formato PEM', [
-                        'ruc' => $configuracion->ruc,
-                        'cert_path' => $pemExtraction['cert_path'],
-                        'key_path' => $pemExtraction['key_path'],
-                    ]);
-                } else {
-                    return response()->json([
-                        'success' => false,
-                        'message' => 'Error al extraer certificado a PEM: ' . $pemExtraction['error']
-                    ], 400);
-                }
-            }
-
-            // Actualizar configuración
-            $configuracion->update($dataToUpdate);
-
-            return response()->json([
-                'success' => true,
-                'message' => 'Configuración SIRE guardada correctamente'
-            ]);
-
-        } catch (\Illuminate\Validation\ValidationException $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Error de validación: ' . implode(', ', $e->validator->errors()->all())
-            ], 422);
-
-        } catch (\Exception $e) {
-            \Log::error('Error al guardar configuración SIRE', [
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString(),
-            ]);
-
-            return response()->json([
-                'success' => false,
-                'message' => 'Error al guardar la configuración: ' . $e->getMessage()
-            ], 500);
-        }
-    }
-
-    /**
-     * Probar conexión con SUNAT usando Greenter
-     */
-    public function testSireConnection(Request $request)
-    {
-        try {
-            $configuracion = ConfiguracionSunat::obtenerActiva();
-
-            if (!$configuracion) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'No hay configuración SUNAT activa'
-                ], 400);
-            }
-
-            // Verificar que los datos necesarios estén configurados
-            $errores = [];
-
-            if (!$configuracion->sire_cert_path) {
-                $errores[] = 'No se ha configurado el certificado digital';
-            }
-
-            if (!$configuracion->sire_cert_password) {
-                $errores[] = 'No se ha configurado la contraseña del certificado';
-            }
-
-            if (!$configuracion->sol_user) {
-                $errores[] = 'No se ha configurado el usuario SOL';
-            }
-
-            if (!$configuracion->sol_pass) {
-                $errores[] = 'No se ha configurado la contraseña SOL';
-            }
-
-            if (count($errores) > 0) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Configuración incompleta',
-                    'errores' => $errores
-                ], 400);
-            }
-
-            // Verificar que el certificado existe físicamente
-            $certPath = storage_path('app/keys/' . $configuracion->sire_cert_path);
-            if (!file_exists($certPath)) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'El archivo del certificado no existe en el servidor'
-                ], 400);
-            }
-
-            // Obtener información del certificado
-            try {
-                $certPassword = decrypt($configuracion->sire_cert_password);
-                $certificadoInfo = $this->obtenerInfoCertificado($certPath, $certPassword);
-            } catch (\Exception $e) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Error al leer el certificado: ' . $e->getMessage()
-                ], 400);
-            }
-
-            // Verificar que el certificado no esté expirado
-            if ($certificadoInfo && isset($certificadoInfo['dias_restantes'])) {
-                if ($certificadoInfo['dias_restantes'] <= 0) {
-                    return response()->json([
-                        'success' => false,
-                        'message' => 'El certificado digital ha expirado',
-                        'certificado' => $certificadoInfo
-                    ], 400);
-                }
-            }
-
-            // Probar conexión con SUNAT usando SireApiService
-            try {
-                $sireService = app(\App\Services\SireApiService::class);
-                $resultadoConexion = $sireService->testConnection();
-
-                if ($resultadoConexion['success']) {
-                    return response()->json([
-                        'success' => true,
-                        'message' => 'Conexión exitosa con SUNAT',
-                        'data' => [
-                            'ambiente' => $configuracion->ambiente,
-                            'ruc' => $configuracion->ruc,
-                            'usuario_sol' => $configuracion->sol_user,
-                            'certificado' => $certificadoInfo,
-                            'sunat_response' => $resultadoConexion['data'] ?? null,
-                        ]
-                    ]);
-                } else {
-                    return response()->json([
-                        'success' => false,
-                        'message' => 'Error al conectar con SUNAT: ' . ($resultadoConexion['error'] ?? 'Error desconocido'),
-                        'data' => [
-                            'ambiente' => $configuracion->ambiente,
-                            'ruc' => $configuracion->ruc,
-                            'certificado' => $certificadoInfo,
-                        ]
-                    ], 400);
-                }
-
-            } catch (\Exception $e) {
-                \Log::error('Error en prueba de conexión SIRE', [
-                    'error' => $e->getMessage(),
-                    'trace' => $e->getTraceAsString(),
-                ]);
-
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Error al probar conexión: ' . $e->getMessage(),
-                    'data' => [
-                        'ambiente' => $configuracion->ambiente,
-                        'ruc' => $configuracion->ruc,
-                        'certificado' => $certificadoInfo,
-                    ]
-                ], 500);
-            }
-
-        } catch (\Exception $e) {
-            \Log::error('Error en test de conexión SIRE', [
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString(),
-            ]);
-
-            return response()->json([
-                'success' => false,
-                'message' => 'Error interno: ' . $e->getMessage()
-            ], 500);
         }
     }
 

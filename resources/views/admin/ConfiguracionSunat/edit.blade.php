@@ -82,10 +82,10 @@
                         <div class="row">
                             <div class="col-md-8">
                                 <div class="form-group mb-0">
-                                    <label for="certificado">Archivo Certificado (.pem o .p12)</label>
+                                    <label for="certificado">Archivo Certificado (.pem, .p12 o .pfx)</label>
                                     <div class="custom-file">
-                                        <input type="file" name="certificado" id="certificado" class="custom-file-input" 
-                                               accept=".pem,.p12">
+                                        <input type="file" name="certificado" id="certificado" class="custom-file-input"
+                                               accept=".pem,.p12,.pfx">
                                         <label class="custom-file-label" for="certificado">
                                             @if($configuracionSunat->certificado_nombre)
                                                 {{ $configuracionSunat->certificado_nombre }}
@@ -98,9 +98,11 @@
                             </div>
                             <div class="col-md-4">
                                 <div class="form-group mb-0">
-                                    <label for="certificado_clave">Contraseña</label>
-                                    <input type="password" name="certificado_clave" id="certificado_clave" class="form-control" 
-                                           value="{{ old('certificado_clave', $configuracionSunat->certificado_clave) }}" placeholder="Solo para .p12">
+                                    <label for="certificado_clave">Contraseña del certificado</label>
+                                    <input type="password" name="certificado_clave" id="certificado_clave" class="form-control"
+                                           value="{{ old('certificado_clave') }}" placeholder="Requerida para .p12 / .pfx"
+                                           autocomplete="new-password">
+                                    <small class="form-text text-muted">Se guardará encriptada. Solo debes llenarla si subes un certificado nuevo.</small>
                                 </div>
                             </div>
                         </div>
