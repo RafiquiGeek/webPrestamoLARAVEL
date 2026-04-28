@@ -1323,6 +1323,103 @@ public function descargarPdf(Comprobante $comprobante)
     }
 
     /**
+     * Reenviar un comprobante con error dentro de 48 horas
+     */
+    public function reenviar(Request $request)
+    {
+        \Log::info('Reenviar comprobante - Iniciando', [
+            'data' => $request->all(),
+        ]);
+
+        try {
+            $request->validate([
+                'cuota_id' => 'required|exists:cuotas,id',
+                'comprobante_id' => 'required|exists:comprobantes,id',
+            ]);
+
+            $cuota = Cuota::findOrFail($request->cuota_id);
+            $comprobante = Comprobante::findOrFail($request->comprobante_id);
+
+            // Validar que el comprobante pertenece a la cuota
+            if ($comprobante->cuota_id != $cuota->id) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'El comprobante no pertenece a esta cuota',
+                ], 400);
+            }
+
+            // Validar que el comprobante está en ERROR
+            if (strtoupper($comprobante->estado) !== 'ERROR') {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Solo se pueden reenviar comprobantes con ERROR',
+                ], 400);
+            }
+
+            // Validar que está dentro de 48 horas
+            if ($comprobante->fecha_emision) {
+                $fechaEmision = \Carbon\Carbon::parse($comprobante->fecha_emision);
+                $hace48Horas = \Carbon\Carbon::now()->subHours(48);
+
+                if ($fechaEmision->lt($hace48Horas)) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'El comprobante ha superado el plazo de 48 horas. Use regenerar en su lugar.',
+                    ], 400);
+                }
+            }
+
+            // Verificar que la cuota está completamente pagada
+            $abonoTotal = DB::table('operaciones_cuota')
+                ->join('operaciones', 'operaciones_cuota.operacion_id', '=', 'operaciones.id')
+                ->where('operaciones_cuota.cuota_id', $cuota->id)
+                ->where('operaciones.estado', '!=', 'anulado')
+                ->sum('operaciones_cuota.monto_aplicado');
+
+            if ($abonoTotal < $cuota->monto) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'La cuota no está completamente pagada',
+                ], 400);
+            }
+
+            // Cambiar estado a PENDIENTE para reintentar
+            $comprobante->update([
+                'estado' => 'PENDIENTE',
+            ]);
+
+            \Log::info('Comprobante reenviado', [
+                'comprobante_id' => $comprobante->id,
+                'serie_numero' => "{$comprobante->serie}-{$comprobante->numero}",
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Comprobante reenviado. Se intentará procesar nuevamente.',
+                'comprobante_id' => $comprobante->id,
+                'numero' => "{$comprobante->serie}-" . str_pad($comprobante->numero, 6, '0', STR_PAD_LEFT),
+            ]);
+
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            \Log::error('Error de validación', ['errors' => $e->errors()]);
+            return response()->json([
+                'success' => false,
+                'message' => 'Datos de entrada inválidos',
+                'errors' => $e->errors(),
+            ], 422);
+        } catch (\Exception $e) {
+            \Log::error('Error reenviando comprobante', [
+                'error' => $e->getMessage(),
+                'line' => $e->getLine(),
+            ]);
+            return response()->json([
+                'success' => false,
+                'message' => 'Error al reenviar el comprobante: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
      * Regenerar un comprobante que tuvo error o superó 48 horas
      */
     public function regenerar(Request $request)

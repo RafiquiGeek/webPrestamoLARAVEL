@@ -2174,6 +2174,82 @@ window.openCronogramaPreview = function(url) {
       });
     });
 
+    // Función global para reenviar comprobante con error dentro de 48 horas
+    window.reenviarComprobanteSunat = function(cuotaId, comprobanteId) {
+      Swal.fire({
+        title: '¿Reenviar Comprobante?',
+        html: `
+          <div class="text-start">
+            <p>Se reenviará el <strong>mismo comprobante</strong> a SUNAT.</p>
+            <p class="text-muted">Se mantiene el mismo número y serie.</p>
+          </div>
+        `,
+        icon: 'info',
+        showCancelButton: true,
+        confirmButtonColor: '#17a2b8',
+        cancelButtonColor: '#6c757d',
+        confirmButtonText: 'Sí, reenviar',
+        cancelButtonText: 'Cancelar',
+        focusConfirm: false
+      }).then((result) => {
+        if (result.isConfirmed) {
+          // Mostrar indicador de carga
+          Swal.fire({
+            title: 'Reenviando Comprobante',
+            text: 'Por favor espere...',
+            allowOutsideClick: false,
+            didOpen: () => {
+              Swal.showLoading();
+            }
+          });
+
+          // Realizar petición para reenviar comprobante
+          fetch('/admin/comprobantes/reenviar', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-CSRF-TOKEN': $('meta[name="csrf-token"]').attr('content')
+            },
+            body: JSON.stringify({
+              cuota_id: cuotaId,
+              comprobante_id: comprobanteId
+            })
+          })
+          .then(response => response.json())
+          .then(data => {
+            Swal.close();
+
+            if (data.success) {
+              Swal.fire({
+                icon: 'success',
+                title: '¡Comprobante Reenviado!',
+                text: data.message || 'El comprobante se ha reenviado correctamente',
+                showConfirmButton: true
+              }).then(() => {
+                // Recargar la página para mostrar los cambios
+                window.location.reload();
+              });
+            } else {
+              Swal.fire({
+                icon: 'error',
+                title: 'Error',
+                text: data.message || 'No se pudo reenviar el comprobante'
+              });
+            }
+          })
+          .catch(error => {
+            console.error('Error:', error);
+            Swal.close();
+            Swal.fire({
+              icon: 'error',
+              title: 'Error de conexión',
+              text: 'Ocurrió un error al reenviar el comprobante'
+            });
+          });
+        }
+      });
+    };
+
     // Función global para regenerar comprobante cuando hay error o superó 48 horas
     window.regenerarComprobanteSunat = function(cuotaId, comprobanteId) {
       Swal.fire({

@@ -248,26 +248,33 @@
                         // Determinar si el comprobante está en error
                         $comprobanteEnError = $comprobante && strtoupper($comprobante->estado) === 'ERROR';
 
-                        // Determinar si el comprobante superó 48 horas SIN ser aceptado
+                        // Calcular tiempo transcurrido desde emisión y si está dentro de 48 horas
+                        $dentroDeHoras48 = false;
                         $comprobanteVencido = false;
                         if ($comprobante && $comprobante->fecha_emision) {
+                            $fechaEmision = \Carbon\Carbon::parse($comprobante->fecha_emision);
+                            $hace48Horas = \Carbon\Carbon::now()->subHours(48);
+                            $dentroDeHoras48 = $fechaEmision->gt($hace48Horas);
+
                             $estadoSunat = strtoupper($comprobante->estado);
                             // Solo contar como vencido si NO ha sido aceptado/enviado exitosamente
                             $noAceptado = !in_array($estadoSunat, ['ENVIADO', 'ACEPTADO', 'ACEPTADO CON OBSERVACIONES']);
 
-                            if ($noAceptado) {
-                                $fechaEmision = \Carbon\Carbon::parse($comprobante->fecha_emision);
-                                $hace48Horas = \Carbon\Carbon::now()->subHours(48);
-                                $comprobanteVencido = $fechaEmision->lt($hace48Horas);
+                            if ($noAceptado && !$dentroDeHoras48) {
+                                $comprobanteVencido = true;
                             }
                         }
 
                         // Determinar si mostrar botón Generar
                         $mostrarBotonGenerar = (!$comprobante || $comprobanteAnulado) && $cuotaTotalmentePagada && $tieneComprobantesHabilitados;
 
-                        // Determinar si mostrar botón Regenerar (solo si hay ERROR o vencido sin aceptación)
+                        // Determinar si mostrar botón Reenviar (ERROR dentro de 48 horas)
+                        $mostrarBotonReenviar = $comprobante && $comprobanteEnError && $dentroDeHoras48 &&
+                                               $cuotaTotalmentePagada && $tieneComprobantesHabilitados;
+
+                        // Determinar si mostrar botón Regenerar (ERROR vencido o vencido sin aceptación)
                         $mostrarBotonRegenerar = $comprobante && $cuotaTotalmentePagada && $tieneComprobantesHabilitados &&
-                                                 ($comprobanteEnError || $comprobanteVencido);
+                                                 ($comprobanteVencido || ($comprobanteEnError && !$dentroDeHoras48));
                     @endphp
 
                     @if($comprobante && !$comprobanteAnulado)
@@ -309,7 +316,16 @@
                                 </small>
                             @endif
 
-                            @if($mostrarBotonRegenerar)
+                            @if($mostrarBotonReenviar)
+                                <div class="mt-2">
+                                    <button type="button" class="btn btn-info btn-sm"
+                                            onclick="reenviarComprobanteSunat({{ $cuota->id }}, {{ $comprobante->id }})"
+                                            title="Reenviar el mismo comprobante a SUNAT">
+                                        <i class="fas fa-share me-1"></i>
+                                        Reenviar
+                                    </button>
+                                </div>
+                            @elseif($mostrarBotonRegenerar)
                                 <div class="mt-2">
                                     <button type="button" class="btn btn-warning btn-sm"
                                             onclick="regenerarComprobanteSunat({{ $cuota->id }}, {{ $comprobante->id }})"

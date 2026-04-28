@@ -491,6 +491,7 @@ Route::middleware('auth')->group(function () {
     Route::get('comprobantes/{comprobante}/xml', [\App\Http\Controllers\Admin\ComprobantesController::class, 'descargarXml'])->name('admin.comprobantes.xml');
     Route::get('comprobantes/{comprobante}/cdr', [\App\Http\Controllers\Admin\ComprobantesController::class, 'descargarCdr'])->name('admin.comprobantes.cdr');
     Route::post('comprobantes/emitir-cuota', [\App\Http\Controllers\Admin\ComprobantesController::class, 'emitirCuota'])->name('admin.comprobantes.emitir-cuota');
+    Route::post('comprobantes/reenviar', [\App\Http\Controllers\Admin\ComprobantesController::class, 'reenviar'])->name('admin.comprobantes.reenviar');
     Route::post('comprobantes/regenerar', [\App\Http\Controllers\Admin\ComprobantesController::class, 'regenerar'])->name('admin.comprobantes.regenerar');
     Route::get('comprobantes/preview-cuota/{cuotaId}', [\App\Http\Controllers\Admin\ComprobantesController::class, 'previewCuota'])->name('admin.comprobantes.preview-cuota');
     Route::post('comprobantes/generar-comprobante-cuota', [\App\Http\Controllers\Admin\ComprobantesController::class, 'generarComprobanteCuota'])->name('admin.comprobantes.generar-comprobante-cuota');
