@@ -233,10 +233,17 @@
                 <!-- Columna de Comprobante SUNAT -->
                 <td class="comprobante-col">
                     @php
-                        // Buscar comprobante asociado a esta cuota específica
-                        $comprobante = \App\Models\Comprobante::where('cuota_id', $cuota->id)
-                            ->whereNotIn('estado', ['ANULADO', 'ELIMINADO', 'BAJA', 'INACTIVO'])
-                            ->first();
+                        // Buscar TODOS los comprobantes de esta cuota (orden más reciente primero)
+                        $comprobantes = \App\Models\Comprobante::where('cuota_id', $cuota->id)
+                            ->orderBy('created_at', 'desc')
+                            ->get();
+
+                        // El más reciente (actual)
+                        $comprobante = $comprobantes->first();
+
+                        // Si hay más de uno, significa que fue reemplazado
+                        $tieneAnterior = $comprobantes->count() > 1;
+                        $comprobanteAnterior = $tieneAnterior ? $comprobantes->get(1) : null;
 
                         // Determinar si la cuota está completamente pagada
                         $cuotaTotalmentePagada = $abonoTotal >= $cuota->monto;
@@ -333,6 +340,30 @@
                                         <i class="fas fa-redo me-1"></i>
                                         Regenerar
                                     </button>
+                                </div>
+                            @endif
+
+                            @if($tieneAnterior && $comprobanteAnterior)
+                                <div class="mt-3 p-2 border border-danger-subtle bg-danger-subtle rounded">
+                                    <small class="text-danger d-block mb-2">
+                                        <strong><i class="fas fa-arrow-up me-1"></i>Reemplazado:</strong>
+                                    </small>
+                                    <small class="text-muted d-block">
+                                        <a href="{{ route('admin.comprobantes.show', $comprobanteAnterior->id) }}"
+                                        class="text-decoration-none text-danger">
+                                            {{ $comprobanteAnterior->serie }}-{{ str_pad($comprobanteAnterior->numero, 6, '0', STR_PAD_LEFT) }}
+                                            <i class="fas fa-external-link-alt fa-xs"></i>
+                                        </a>
+                                    </small>
+                                    <small class="text-muted d-block">
+                                        {{ \Carbon\Carbon::parse($comprobanteAnterior->created_at)->format('d/m/Y H:i') }}
+                                    </small>
+                                    @php
+                                        $estadoAnterior = strtoupper($comprobanteAnterior->estado);
+                                    @endphp
+                                    <small class="d-block mt-1">
+                                        <span class="badge bg-secondary">{{ $estadoAnterior }}</span>
+                                    </small>
                                 </div>
                             @endif
                         </div>
