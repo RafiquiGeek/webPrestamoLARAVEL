@@ -241,12 +241,33 @@
                         // Determinar si la cuota está completamente pagada
                         $cuotaTotalmentePagada = $abonoTotal >= $cuota->monto;
                         $tieneComprobantesHabilitados = $prestamo->tiene_comprobante == 1;
-                        
+
                         // Determinar si el comprobante está anulado
                         $comprobanteAnulado = $comprobante && in_array(strtoupper($comprobante->estado), ['ANULADO', 'ELIMINADO', 'BAJA', 'INACTIVO']);
-                        
+
+                        // Determinar si el comprobante está en error
+                        $comprobanteEnError = $comprobante && strtoupper($comprobante->estado) === 'ERROR';
+
+                        // Determinar si el comprobante superó 48 horas SIN ser aceptado
+                        $comprobanteVencido = false;
+                        if ($comprobante && $comprobante->fecha_emision) {
+                            $estadoSunat = strtoupper($comprobante->estado);
+                            // Solo contar como vencido si NO ha sido aceptado/enviado exitosamente
+                            $noAceptado = !in_array($estadoSunat, ['ENVIADO', 'ACEPTADO', 'ACEPTADO CON OBSERVACIONES']);
+
+                            if ($noAceptado) {
+                                $fechaEmision = \Carbon\Carbon::parse($comprobante->fecha_emision);
+                                $hace48Horas = \Carbon\Carbon::now()->subHours(48);
+                                $comprobanteVencido = $fechaEmision->lt($hace48Horas);
+                            }
+                        }
+
                         // Determinar si mostrar botón Generar
                         $mostrarBotonGenerar = (!$comprobante || $comprobanteAnulado) && $cuotaTotalmentePagada && $tieneComprobantesHabilitados;
+
+                        // Determinar si mostrar botón Regenerar (solo si hay ERROR o vencido sin aceptación)
+                        $mostrarBotonRegenerar = $comprobante && $cuotaTotalmentePagada && $tieneComprobantesHabilitados &&
+                                                 ($comprobanteEnError || $comprobanteVencido);
                     @endphp
 
                     @if($comprobante && !$comprobanteAnulado)
@@ -256,6 +277,7 @@
                                 'ENVIADO', 'ACEPTADO' => ['success', 'check-circle', 'Emitido'],
                                 'PENDIENTE' => ['warning', 'clock', 'Pendiente'],
                                 'GENERADO_UBL', 'GENERADO_LOCAL' => ['info', 'file-alt', 'Generado'],
+                                'ERROR' => ['danger', 'exclamation-triangle', 'Error'],
                                 'ANULADO', 'ELIMINADO', 'BAJA', 'INACTIVO' => ['danger', 'ban', 'Anulado'],
                                 default => ['secondary', 'question', 'Desconocido']
                             };
@@ -266,6 +288,16 @@
                                 {{ $statusData[2] }}
                             </span>
 
+                            @if($comprobanteEnError || $comprobanteVencido)
+                                <small class="text-muted d-block mt-1">
+                                    @if($comprobanteEnError)
+                                        <em>Error en la emisión</em>
+                                    @elseif($comprobanteVencido)
+                                        <em>Superó 48 horas</em>
+                                    @endif
+                                </small>
+                            @endif
+
                             @if($comprobante->serie && $comprobante->numero)
                                 <small class="text-muted d-block mt-1">
                                     <a href="{{ route('admin.comprobantes.show', $comprobante->id) }}"
@@ -275,6 +307,17 @@
                                         <i class="fas fa-external-link-alt fa-xs"></i>
                                     </a>
                                 </small>
+                            @endif
+
+                            @if($mostrarBotonRegenerar)
+                                <div class="mt-2">
+                                    <button type="button" class="btn btn-warning btn-sm"
+                                            onclick="regenerarComprobanteSunat({{ $cuota->id }}, {{ $comprobante->id }})"
+                                            title="Generar nuevo comprobante hoy">
+                                        <i class="fas fa-redo me-1"></i>
+                                        Regenerar
+                                    </button>
+                                </div>
                             @endif
                         </div>
                     @elseif($mostrarBotonGenerar)

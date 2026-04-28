@@ -2173,7 +2173,83 @@ window.openCronogramaPreview = function(url) {
         }
       });
     });
-    
+
+    // Función global para regenerar comprobante cuando hay error o superó 48 horas
+    window.regenerarComprobanteSunat = function(cuotaId, comprobanteId) {
+      Swal.fire({
+        title: '¿Regenerar Comprobante?',
+        html: `
+          <div class="text-start">
+            <p>Se generará un <strong>nuevo comprobante hoy</strong> para esta cuota.</p>
+            <p class="text-muted">El comprobante anterior será anulado.</p>
+          </div>
+        `,
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonColor: '#ff9800',
+        cancelButtonColor: '#6c757d',
+        confirmButtonText: 'Sí, regenerar',
+        cancelButtonText: 'Cancelar',
+        focusConfirm: false
+      }).then((result) => {
+        if (result.isConfirmed) {
+          // Mostrar indicador de carga
+          Swal.fire({
+            title: 'Regenerando Comprobante',
+            text: 'Por favor espere...',
+            allowOutsideClick: false,
+            didOpen: () => {
+              Swal.showLoading();
+            }
+          });
+
+          // Realizar petición para regenerar comprobante
+          fetch('/admin/comprobantes/regenerar', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-CSRF-TOKEN': $('meta[name="csrf-token"]').attr('content')
+            },
+            body: JSON.stringify({
+              cuota_id: cuotaId,
+              comprobante_id: comprobanteId
+            })
+          })
+          .then(response => response.json())
+          .then(data => {
+            Swal.close();
+
+            if (data.success) {
+              Swal.fire({
+                icon: 'success',
+                title: '¡Comprobante Regenerado!',
+                text: data.message || 'El comprobante se ha regenerado correctamente',
+                showConfirmButton: true
+              }).then(() => {
+                // Recargar la página para mostrar los cambios
+                window.location.reload();
+              });
+            } else {
+              Swal.fire({
+                icon: 'error',
+                title: 'Error',
+                text: data.message || 'No se pudo regenerar el comprobante'
+              });
+            }
+          })
+          .catch(error => {
+            console.error('Error:', error);
+            Swal.close();
+            Swal.fire({
+              icon: 'error',
+              title: 'Error de conexión',
+              text: 'Ocurrió un error al regenerar el comprobante'
+            });
+          });
+        }
+      });
+    };
+
     // Manejar clicks en botones de colapso (acordeón)
     $(document).off('click', '[data-bs-toggle="collapse"]').on('click', '[data-bs-toggle="collapse"]', function(e) {
       e.preventDefault();

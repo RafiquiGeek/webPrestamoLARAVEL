@@ -1321,5 +1321,158 @@ public function descargarPdf(Comprobante $comprobante)
             'message' => 'Emisión de Notas de Débito no disponible actualmente (Migración SIRE).',
         ], 400);
     }
+
+    /**
+     * Regenerar un comprobante que tuvo error o superó 48 horas
+     */
+    public function regenerar(Request $request)
+    {
+        \Log::info('Regenerar comprobante - Iniciando', [
+            'data' => $request->all(),
+        ]);
+
+        try {
+            $request->validate([
+                'cuota_id' => 'required|exists:cuotas,id',
+                'comprobante_id' => 'required|exists:comprobantes,id',
+            ]);
+
+            $cuota = Cuota::findOrFail($request->cuota_id);
+            $comprobanteAnterior = Comprobante::findOrFail($request->comprobante_id);
+
+            // Validar que el comprobante anterior pertenece a la cuota
+            if ($comprobanteAnterior->cuota_id != $cuota->id) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'El comprobante no pertenece a esta cuota',
+                ], 400);
+            }
+
+            // Verificar que la cuota está completamente pagada
+            $abonoTotal = DB::table('operaciones_cuota')
+                ->join('operaciones', 'operaciones_cuota.operacion_id', '=', 'operaciones.id')
+                ->where('operaciones_cuota.cuota_id', $cuota->id)
+                ->where('operaciones.estado', '!=', 'anulado')
+                ->sum('operaciones_cuota.monto_aplicado');
+
+            if ($abonoTotal < $cuota->monto) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'La cuota no está completamente pagada',
+                ], 400);
+            }
+
+            // Verificar que el préstamo tiene comprobantes habilitados
+            $prestamo = $cuota->prestamo;
+            if (!$prestamo || !$prestamo->tiene_comprobante) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Los comprobantes no están habilitados para este préstamo',
+                ], 400);
+            }
+
+            DB::beginTransaction();
+
+            try {
+                // Determinar motivo de regeneración
+                $estadoAnterior = strtoupper($comprobanteAnterior->estado);
+                if ($estadoAnterior === 'ERROR') {
+                    $motivoRegeneracion = 'Comprobante con ERROR - Regenerado el ' . \Carbon\Carbon::now()->format('Y-m-d H:i:s');
+                } else {
+                    $motivoRegeneracion = 'Comprobante vencido (>48 horas sin aceptación) - Regenerado el ' . \Carbon\Carbon::now()->format('Y-m-d H:i:s');
+                }
+
+                // Anular el comprobante anterior
+                $comprobanteAnterior->update([
+                    'estado' => 'ANULADO',
+                    'motivo_anulacion' => $motivoRegeneracion,
+                    'fecha_anulacion' => now(),
+                ]);
+
+                \Log::info('Comprobante anterior anulado', [
+                    'comprobante_id' => $comprobanteAnterior->id,
+                ]);
+
+                // Obtener la configuración SUNAT para generar el nuevo
+                $configuracionSunat = \App\Models\ConfiguracionSunat::obtenerActiva();
+                if (!$configuracionSunat) {
+                    throw new \Exception('No hay configuración SUNAT activa');
+                }
+
+                // Usar la serie del comprobante anterior (generalmente B001 para boletas)
+                $serie = $comprobanteAnterior->serie ?? $configuracionSunat->serie_boleta;
+                $ultimoComprobante = Comprobante::where('serie', $serie)
+                    ->where('tipo_comprobante', $comprobanteAnterior->tipo_comprobante)
+                    ->where('estado', '!=', 'ANULADO')
+                    ->orderBy('numero', 'desc')
+                    ->first();
+                $numero = $ultimoComprobante ? $ultimoComprobante->numero + 1 : 1;
+
+                // Preparar datos del nuevo comprobante
+                $nuevoComprobante = new Comprobante([
+                    'cliente_id' => $prestamo->cliente_id,
+                    'prestamo_id' => $prestamo->id,
+                    'cuota_id' => $cuota->id,
+                    'tipo_comprobante' => $comprobanteAnterior->tipo_comprobante,
+                    'serie' => $serie,
+                    'numero' => $numero,
+                    'fecha_emision' => now(),
+                    'moneda' => 'PEN',
+                    'estado' => 'PENDIENTE',
+                    'total' => $cuota->monto,
+                ]);
+
+                // Copiar items del comprobante anterior si existen
+                if ($comprobanteAnterior->items && is_array($comprobanteAnterior->items)) {
+                    $nuevoComprobante->items = $comprobanteAnterior->items;
+                }
+
+                $nuevoComprobante->save();
+
+                \Log::info('Nuevo comprobante creado', [
+                    'comprobante_id' => $nuevoComprobante->id,
+                    'serie' => $serie,
+                    'numero' => $numero,
+                ]);
+
+                // TODO: Aquí iría la lógica para emitir al SIRE si está disponible
+                // Por ahora solo creamos el registro local
+
+                DB::commit();
+
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Comprobante regenerado exitosamente',
+                    'comprobante_id' => $nuevoComprobante->id,
+                    'numero_nuevo' => "{$serie}-" . str_pad($numero, 6, '0', STR_PAD_LEFT),
+                ]);
+
+            } catch (\Exception $e) {
+                DB::rollback();
+                \Log::error('Error regenerando comprobante', [
+                    'error' => $e->getMessage(),
+                    'trace' => $e->getTraceAsString(),
+                ]);
+                throw $e;
+            }
+
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            \Log::error('Error de validación', ['errors' => $e->errors()]);
+            return response()->json([
+                'success' => false,
+                'message' => 'Datos de entrada inválidos',
+                'errors' => $e->errors(),
+            ], 422);
+        } catch (\Exception $e) {
+            \Log::error('Error regenerando comprobante', [
+                'error' => $e->getMessage(),
+                'line' => $e->getLine(),
+            ]);
+            return response()->json([
+                'success' => false,
+                'message' => 'Error al regenerar el comprobante: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
 }
 
